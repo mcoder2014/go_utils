@@ -5,10 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"os/signal"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/mcoder2014/go_utils/common"
+	"github.com/mcoder2014/go_utils/log"
 )
 
 type Executor struct {
@@ -35,15 +39,18 @@ type Executor struct {
 	ExitMsg  string
 
 	done      chan struct{}
+	sigs      chan os.Signal
 	isRunning atomic.Bool
 }
 
 func NewExecutor(binaryPath string, params ...string) *Executor {
-	return &Executor{
+	e := &Executor{
 		BinaryPath: binaryPath,
 		Params:     params,
 		done:       make(chan struct{}),
 	}
+	signal.Notify(e.sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	return e
 }
 
 // Build 参数均设置完成后调用
@@ -104,6 +111,10 @@ func (e *Executor) Exec(ctx context.Context) error {
 	select {
 	case <-e.done:
 		return e.Error
+	case sig := <-e.sigs:
+		log.Ctx(ctx).Warnf("received signal: %s, kill sub program", sig.String())
+		_ = e.Kill()
+		return fmt.Errorf("process killed by signal: %s", sig.String())
 	}
 }
 
