@@ -30,6 +30,9 @@ type Executor struct {
 	Stdout io.Writer
 	Stderr io.Writer
 
+	// 额外信息，供使用方自行使用
+	Extra map[string]string
+
 	// 依赖的执行器
 	cmd *exec.Cmd
 
@@ -48,6 +51,8 @@ func NewExecutor(binaryPath string, params ...string) *Executor {
 		BinaryPath: binaryPath,
 		Params:     params,
 		done:       make(chan struct{}),
+		sigs:       make(chan os.Signal),
+		Extra:      make(map[string]string),
 	}
 	signal.Notify(e.sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	return e
@@ -88,13 +93,16 @@ func (e *Executor) Exec(ctx context.Context) error {
 
 	// 异步执行命令
 	go func() {
-		defer close(e.done)
+		defer func() {
+			e.done <- struct{}{}
+		}()
 		defer func() {
 			e.isRunning.Store(false)
 		}()
 		defer common.Recovery(ctx)
 
 		e.isRunning.Store(true)
+		log.Ctx(ctx).Infof("start sub program: %s param: %v", e.BinaryPath, e.Params)
 		err := e.cmd.Run() // 阻塞式
 		if err != nil {
 			e.Error = err
@@ -122,7 +130,8 @@ func (e *Executor) Kill() error {
 	if e.cmd == nil {
 		return nil
 	}
-
+	log.Ctx(context.Background()).Infof("kill sub program: %s pid=%v param=%v",
+		e.BinaryPath, e.cmd.Process.Pid, e.Params)
 	return e.cmd.Process.Kill()
 }
 
