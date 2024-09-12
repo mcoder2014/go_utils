@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/mcoder2014/go_utils/common"
 	"github.com/mcoder2014/go_utils/log"
@@ -60,9 +61,17 @@ func NewExecutor(binaryPath string, params ...string) *Executor {
 
 // Build 参数均设置完成后调用
 func (e *Executor) Build() *Executor {
-	if e.cmd != nil {
-		return e
+	if e.cmd != nil { // 已经有数据的 cmd 可再次执行 build，会尝试终止此前的进程
+		// 尝试 kill 存量的 cmd
+		if e.cmd.ProcessState != nil && !e.cmd.ProcessState.Exited() {
+			for _idx := 0; _idx < 100 && e.cmd.ProcessState != nil && !e.cmd.ProcessState.Exited(); _idx++ {
+				_ = e.Kill()
+				time.Sleep(1 * time.Second)
+			}
+		}
 	}
+
+	// 构建新的 cmd, 并指定数据
 	e.cmd = exec.Command(e.BinaryPath, e.Params...)
 
 	if e.Stdin != nil {
@@ -112,6 +121,7 @@ func (e *Executor) Exec(ctx context.Context) error {
 				e.ExitCode = exitErr.ExitCode()
 				e.ExitMsg = exitErr.String()
 			}
+			log.Ctx(ctx).WithError(err).Warnf("sub program exit with error, code: %d msg: %v", e.ExitCode, e.ExitMsg)
 		}
 	}()
 
