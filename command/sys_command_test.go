@@ -34,6 +34,6 @@ func TestSystemCommand(t *testing.T) {
 	require.NoError(t, err)
 
 	time.Sleep(2 * time.Second)
-	t.Logf("program exited: %s exited code:%v exited msg:%v", err, executor.ExitCode, executor.ExitMsg)
+	t.Logf("program exited: %s exited code:%v exited msg:%v", err, executor.ExitCode, executor.exitMsg)
 	require.False(t, executor.IsRunning())
 }

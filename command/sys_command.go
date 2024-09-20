@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -38,13 +39,32 @@ type Executor struct {
 	cmd *exec.Cmd
 
 	// 如果执行失败，可以从这里获取错误
-	Error    error
-	ExitCode int
-	ExitMsg  string
+	errMutex sync.RWMutex
+	exitErr  error
+	exitCode int
+	exitMsg  string
 
 	done      chan struct{}
 	sigs      chan os.Signal
 	isRunning atomic.Bool
+}
+
+func (e *Executor) Error() error {
+	e.errMutex.RLock()
+	defer e.errMutex.RUnlock()
+	return e.exitErr
+}
+
+func (e *Executor) ExitCode() int {
+	e.errMutex.RLock()
+	defer e.errMutex.RUnlock()
+	return e.exitCode
+}
+
+func (e *Executor) ExitMsg() string {
+	e.errMutex.RLock()
+	defer e.errMutex.RUnlock()
+	return e.exitMsg
 }
 
 func NewExecutor(binaryPath string, params ...string) *Executor {
@@ -62,9 +82,8 @@ func NewExecutor(binaryPath string, params ...string) *Executor {
 // Build 参数均设置完成后调用
 func (e *Executor) Build() *Executor {
 	if e.cmd != nil { // 已经有数据的 cmd 可再次执行 build，会尝试终止此前的进程
-		// 尝试 kill 存量的 cmd
-		if e.cmd.ProcessState != nil && !e.cmd.ProcessState.Exited() {
-			for _idx := 0; _idx < 100 && e.cmd.ProcessState != nil && !e.cmd.ProcessState.Exited(); _idx++ {
+		if e.IsRunning() {
+			for _idx := 0; _idx < 100 && e.IsRunning(); _idx++ {
 				_ = e.Kill()
 				time.Sleep(1 * time.Second)
 			}
@@ -91,6 +110,13 @@ func (e *Executor) Build() *Executor {
 		e.cmd.Dir = e.Dir
 	}
 
+	// 重置程序退出的错误信息
+	e.errMutex.Lock()
+	defer e.errMutex.Unlock()
+	e.exitMsg = ""
+	e.exitCode = 0
+	e.exitErr = nil
+
 	return e
 }
 
@@ -102,33 +128,34 @@ func (e *Executor) Exec(ctx context.Context) error {
 
 	// 异步执行命令
 	go func() {
-		defer func() {
-			e.done <- struct{}{}
-		}()
+		defer common.Recovery(ctx)
 		defer func() {
 			e.isRunning.Store(false)
+			e.done <- struct{}{}
 		}()
-		defer common.Recovery(ctx)
 
 		e.isRunning.Store(true)
 		log.Ctx(ctx).Infof("start sub program: %s param: %v", e.BinaryPath, e.Params)
+
 		err := e.cmd.Run() // 阻塞式
 		if err != nil {
-			e.Error = err
-			e.ExitCode = -1 // 未知
+			e.errMutex.Lock()
+			defer e.errMutex.Unlock()
+			e.exitErr = err
+			e.exitCode = 255 // 未知
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) {
-				e.ExitCode = exitErr.ExitCode()
-				e.ExitMsg = exitErr.String()
+				e.exitCode = exitErr.ExitCode()
+				e.exitMsg = exitErr.String()
 			}
-			log.Ctx(ctx).WithError(err).Warnf("sub program exit with error, code: %d msg: %v", e.ExitCode, e.ExitMsg)
+			log.Ctx(ctx).WithError(err).Warnf("sub program exit with error, code: %d msg: %v", e.exitCode, e.exitMsg)
 		}
 	}()
 
 	// 阻塞，等待执行结果
 	select {
 	case <-e.done:
-		return e.Error
+		return e.exitErr
 	case sig := <-e.sigs:
 		log.Ctx(ctx).Warnf("received signal: %s, kill sub program", sig.String())
 		_ = e.Kill()
